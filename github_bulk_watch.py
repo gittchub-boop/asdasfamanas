@@ -211,6 +211,12 @@ ACTION = os.environ.get("ACTION", "watch")
 # ^ "watch"  -> normal calisma (repolari izlemeye alir, orijinal davranis)
 #   "unwatch" -> daha once bu scriptle watch edilmis repolari geri alir
 
+RESET_STATE = os.environ.get("RESET_STATE", "0") == "1"
+# ^ "1" yaparsan eskiden kalan (cache'ten gelen) state dosyasi yok
+#   sayilir, sifirdan taranir. Ozellikle bozuk/yanlis bir state
+#   (mesela token hatasi yuzunden her sorgu 'basarisiz ama tarandi'
+#   diye isaretlenmisse) birikmisse bunu temizlemek icin kullan.
+
 NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "")
 # ^ Bos birakirsan bildirim gonderilmez. Doldurursan (ornek: "iboo-ghwatch")
 #   script bitince telefonuna (ntfy app - iOS'ta App Store'da var) push
@@ -292,10 +298,15 @@ def request_with_retry(method, url, retries=5, **kwargs):
 
 
 def search_bucket(query, max_items=1000):
-    """Tek bir arama sorgusu icin, en yuksekten en dusuge repo arar."""
+    """Tek bir arama sorgusu icin, en yuksekten en dusuge repo arar.
+    EKLENDI: artik (repos, basarili_mi) tuple'i donduruyor - boylece
+    cagiran taraf, sorgu GERCEKTEN basarili mi yoksa hata yuzunden mi
+    bos donduyu ayirt edip, sadece basarili olani state'e 'tarandi'
+    diye isaretleyebiliyor."""
     repos = []
     page = 1
     per_page = 100
+    ok = True
     while len(repos) < max_items:
         params = {
             "q": query,
@@ -308,11 +319,13 @@ def search_bucket(query, max_items=1000):
         if r is None or r.status_code != 200:
             # EKLENDI: eskiden burada hicbir sey yazdirmadan sessizce
             # break ediliyordu, bu yuzden 0 sonuc alindiginda neden
-            # basarisiz oldugunu gormek imkansizdi. Simdi gosteriyoruz.
+            # basarisiz oldugunu gormek imkansizdi. Simdi gosteriyoruz
+            # VE basarisiz oldugunu isaretliyoruz (ok = False).
             if r is not None:
                 safe_print(f"   ❌ Arama isteği başarısız: HTTP {r.status_code} -> {r.text[:200]}")
             else:
                 safe_print("   ❌ Arama isteği başarısız: sunucudan yanıt alınamadı")
+            ok = False
             break
         data = r.json().get("items", [])
         if not data:
@@ -322,7 +335,7 @@ def search_bucket(query, max_items=1000):
         if page > MAX_PAGES_PER_QUERY:
             break
         time.sleep(SEARCH_SLEEP_SECONDS)
-    return repos[:max_items]
+    return repos[:max_items], ok
 
 
 def finalize(merged, n):
@@ -357,6 +370,9 @@ def watch_repo(repo):
 # =============================================================================
 
 def load_state():
+    if RESET_STATE:
+        safe_print("🔄 RESET_STATE aktif: eski state (varsa) yok sayılıyor, sıfırdan başlanıyor.")
+        return {"queries_done": [], "repos": {}, "watched": [], "unwatched": []}
     if os.path.exists(STATE_FILE):
         try:
             with open(STATE_FILE, "r", encoding="utf-8") as f:
@@ -514,8 +530,12 @@ def get_all_repos(n):
                 safe_print(f"⏭️  [{i}/{len(STAR_BUCKETS)}] Zaten tarandı, atlanıyor: {bucket}")
             else:
                 safe_print(f"🔍 [{i}/{len(STAR_BUCKETS)}] Taranıyor: {bucket}")
-                add_repos(search_bucket(query))
-                checkpoint(query)
+                found, ok = search_bucket(query)
+                add_repos(found)
+                if ok:
+                    checkpoint(query)
+                else:
+                    safe_print(f"   ⚠️  '{query}' sorgusu hatalı bitti, tekrar denenmek üzere state'e işaretlenmedi.")
             safe_print(f"   -> toplam {len(merged)} benzersiz repo")
             if len(merged) >= n:
                 return finalize(merged, n)
@@ -530,8 +550,12 @@ def get_all_repos(n):
                 safe_print(f"⏭️  [{i}/{len(LANGUAGES)}] Zaten tarandı, atlanıyor: {lang}")
             else:
                 safe_print(f"🔍 [{i}/{len(LANGUAGES)}] Dil: {lang}")
-                add_repos(search_bucket(query))
-                checkpoint(query)
+                found, ok = search_bucket(query)
+                add_repos(found)
+                if ok:
+                    checkpoint(query)
+                else:
+                    safe_print(f"   ⚠️  '{query}' sorgusu hatalı bitti, tekrar denenmek üzere state'e işaretlenmedi.")
             safe_print(f"   -> toplam {len(merged)} benzersiz repo")
             if len(merged) >= n:
                 return finalize(merged, n)
@@ -546,8 +570,12 @@ def get_all_repos(n):
                 safe_print(f"⏭️  [{i}/{len(TOPICS)}] Zaten tarandı, atlanıyor: {topic}")
             else:
                 safe_print(f"🔍 [{i}/{len(TOPICS)}] Topic: {topic}")
-                add_repos(search_bucket(query))
-                checkpoint(query)
+                found, ok = search_bucket(query)
+                add_repos(found)
+                if ok:
+                    checkpoint(query)
+                else:
+                    safe_print(f"   ⚠️  '{query}' sorgusu hatalı bitti, tekrar denenmek üzere state'e işaretlenmedi.")
             safe_print(f"   -> toplam {len(merged)} benzersiz repo")
             if len(merged) >= n:
                 return finalize(merged, n)
@@ -562,8 +590,12 @@ def get_all_repos(n):
                 safe_print(f"⏭️  [{i}/{len(PUSHED_WINDOWS)}] Zaten tarandı, atlanıyor: {window}")
             else:
                 safe_print(f"🔍 [{i}/{len(PUSHED_WINDOWS)}] {query}")
-                add_repos(search_bucket(query))
-                checkpoint(query)
+                found, ok = search_bucket(query)
+                add_repos(found)
+                if ok:
+                    checkpoint(query)
+                else:
+                    safe_print(f"   ⚠️  '{query}' sorgusu hatalı bitti, tekrar denenmek üzere state'e işaretlenmedi.")
             safe_print(f"   -> toplam {len(merged)} benzersiz repo")
             if len(merged) >= n:
                 return finalize(merged, n)
@@ -578,8 +610,12 @@ def get_all_repos(n):
                 safe_print(f"⏭️  [{i}/{len(FORK_BUCKETS)}] Zaten tarandı, atlanıyor: {bucket}")
             else:
                 safe_print(f"🔍 [{i}/{len(FORK_BUCKETS)}] Fork: {bucket}")
-                add_repos(search_bucket(query))
-                checkpoint(query)
+                found, ok = search_bucket(query)
+                add_repos(found)
+                if ok:
+                    checkpoint(query)
+                else:
+                    safe_print(f"   ⚠️  '{query}' sorgusu hatalı bitti, tekrar denenmek üzere state'e işaretlenmedi.")
             safe_print(f"   -> toplam {len(merged)} benzersiz repo")
             if len(merged) >= n:
                 return finalize(merged, n)
@@ -594,8 +630,12 @@ def get_all_repos(n):
                 safe_print(f"⏭️  [{i}/{len(ORGS)}] Zaten tarandı, atlanıyor: {org}")
             else:
                 safe_print(f"🔍 [{i}/{len(ORGS)}] Org: {org}")
-                add_repos(search_bucket(query))
-                checkpoint(query)
+                found, ok = search_bucket(query)
+                add_repos(found)
+                if ok:
+                    checkpoint(query)
+                else:
+                    safe_print(f"   ⚠️  '{query}' sorgusu hatalı bitti, tekrar denenmek üzere state'e işaretlenmedi.")
             safe_print(f"   -> toplam {len(merged)} benzersiz repo")
             if len(merged) >= n:
                 return finalize(merged, n)
@@ -610,8 +650,12 @@ def get_all_repos(n):
                 safe_print(f"⏭️  [{i}/{len(LICENSES)}] Zaten tarandı, atlanıyor: {lic}")
             else:
                 safe_print(f"🔍 [{i}/{len(LICENSES)}] Lisans: {lic}")
-                add_repos(search_bucket(query))
-                checkpoint(query)
+                found, ok = search_bucket(query)
+                add_repos(found)
+                if ok:
+                    checkpoint(query)
+                else:
+                    safe_print(f"   ⚠️  '{query}' sorgusu hatalı bitti, tekrar denenmek üzere state'e işaretlenmedi.")
             safe_print(f"   -> toplam {len(merged)} benzersiz repo")
             if len(merged) >= n:
                 return finalize(merged, n)
