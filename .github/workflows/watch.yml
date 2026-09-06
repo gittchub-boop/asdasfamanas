@@ -1,0 +1,64 @@
+name: GitHub Bulk Watch
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "watch mi unwatch mi?"
+        type: choice
+        options: [watch, unwatch]
+        default: watch
+      dry_run:
+        description: "Gerçekten watch/unwatch atma, sadece simüle et"
+        type: boolean
+        default: false
+      reset_state:
+        description: "Eski (cache'lenmiş) state'i temizle, sıfırdan tara"
+        type: boolean
+        default: false
+
+jobs:
+  run-script:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    # ^ Actions'ın ücretsiz plan üst sınırı ~360 dk. TOP_N çok yüksekse
+    #   bir çalıştırmada bitmeyebilir; state cache sayesinde bir sonraki
+    #   çalıştırma kaldığı yerden devam eder.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Bağımlılıkları kur
+        run: pip install requests
+
+      # EKLENDI: state dosyasını çalıştırmalar arasında kalıcı tutar
+      - name: State dosyasını cache'ten geri yükle
+        uses: actions/cache@v4
+        with:
+          path: github_watch_state.json
+          key: github-watch-state-${{ github.run_id }}
+          restore-keys: |
+            github-watch-state-
+
+      - name: Scripti çalıştır
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          ACTION: ${{ inputs.action }}
+          DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
+          RESET_STATE: ${{ inputs.reset_state && '1' || '0' }}
+          # NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}   # istersen aç, telefonuna push bildirim gider
+        run: python github_bulk_watch.py
+
+      # EKLENDI: rapor ve state dosyasını indirilebilir artifact yap
+      - name: Rapor ve state'i artifact olarak yükle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: github-watch-output
+          path: |
+            github_watch_report.csv
+            github_watch_state.json
+            github_watch.log
