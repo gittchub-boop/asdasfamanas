@@ -36,7 +36,12 @@ on:
 permissions:
   contents: write
   pull-requests: write
-  # ^ ÖNEMLİ: bu script SADECE bu repoya (workflow'un çalıştığı repo)
+  issues: write
+  # ^ issues: write ONEMLI - etiket/yorum/reaksiyon eklemek ve junk
+  #   Issue'lar acmak da bu izni kullanir (PR'lar GitHub'in altyapisinda
+  #   issue sayilir). Bu olmadan hepsi "403 Resource not accessible by
+  #   integration" hatasi verir.
+  # ^ Bu script SADECE bu repoya (workflow'un çalıştığı repo)
   #   erişebilen otomatik GITHUB_TOKEN'ı kullanıyor. Ayrıca bir
   #   GH_TOKEN secret'i eklemene GEREK YOK - bu daha güvenli, çünkü
   #   token başka hiçbir repoya dokunamaz.
