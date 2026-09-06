@@ -233,7 +233,7 @@ def create_branch(new_branch, base_sha):
         return True
     if r is not None and r.status_code == 422 and "already exists" in r.text.lower():
         return True  # zaten var, devam edelim
-    log(f"   ❌ Branch oluşturulamadı: HTTP {r.status_code if r else '?'} -> {r.text[:200] if r else 'yanıt yok'}")
+    log(f"   ❌ Branch oluşturulamadı: HTTP {r.status_code if r is not None else '?'} -> {r.text[:200] if r is not None else 'yanıt yok'}")
     return False
 
 
@@ -243,7 +243,7 @@ def create_junk_file(branch, path, content, message):
     r = request_with_retry("PUT", f"{API}/repos/{REPO_OWNER}/{REPO_NAME}/contents/{path}", json=payload)
     if r is not None and r.status_code in (200, 201):
         return True
-    log(f"   ❌ Dosya oluşturulamadı: HTTP {r.status_code if r else '?'} -> {r.text[:200] if r else 'yanıt yok'}")
+    log(f"   ❌ Dosya oluşturulamadı: HTTP {r.status_code if r is not None else '?'} -> {r.text[:200] if r is not None else 'yanıt yok'}")
     return False
 
 
@@ -253,7 +253,7 @@ def create_pr(branch, base, title, body):
     if r is not None and r.status_code == 201:
         data = r.json()
         return data.get("html_url"), data.get("number")
-    log(f"   ❌ PR açılamadı: HTTP {r.status_code if r else '?'} -> {r.text[:200] if r else 'yanıt yok'}")
+    log(f"   ❌ PR açılamadı: HTTP {r.status_code if r is not None else '?'} -> {r.text[:200] if r is not None else 'yanıt yok'}")
     return None, None
 
 
@@ -277,7 +277,7 @@ def ensure_labels():
         )
         if r is not None and r.status_code in (201, 422):
             continue  # 201 = olusturuldu, 422 = zaten var
-        log(f"   ⚠️  '{name}' etiketi oluşturulamadı: HTTP {r.status_code if r else '?'}")
+        log(f"   ⚠️  '{name}' etiketi oluşturulamadı: HTTP {r.status_code if r is not None else '?'}")
     _labels_ensured = True
 
 
@@ -292,7 +292,7 @@ def add_labels(issue_number):
         json={"labels": isimler},
     )
     if r is None or r.status_code not in (200, 201):
-        log(f"   ⚠️  Etiket eklenemedi: HTTP {r.status_code if r else '?'}")
+        log(f"   ⚠️  Etiket eklenemedi: HTTP {r.status_code if r is not None else '?'}")
 
 
 def add_comment(issue_number):
@@ -305,7 +305,7 @@ def add_comment(issue_number):
         json={"body": body},
     )
     if r is None or r.status_code != 201:
-        log(f"   ⚠️  Yorum eklenemedi: HTTP {r.status_code if r else '?'}")
+        log(f"   ⚠️  Yorum eklenemedi: HTTP {r.status_code if r is not None else '?'}")
 
 
 def add_reaction(issue_number):
@@ -318,7 +318,7 @@ def add_reaction(issue_number):
         json={"content": content},
     )
     if r is None or r.status_code != 201:
-        log(f"   ⚠️  Reaksiyon eklenemedi: HTTP {r.status_code if r else '?'}")
+        log(f"   ⚠️  Reaksiyon eklenemedi: HTTP {r.status_code if r is not None else '?'}")
 
 
 def create_junk_issue(n):
@@ -333,7 +333,7 @@ def create_junk_issue(n):
         url = r.json().get("html_url")
         log(f"   ✅ Junk issue açıldı: {url}")
         return url
-    log(f"   ❌ Issue açılamadı: HTTP {r.status_code if r else '?'} -> {r.text[:200] if r else 'yanıt yok'}")
+    log(f"   ❌ Issue açılamadı: HTTP {r.status_code if r is not None else '?'} -> {r.text[:200] if r is not None else 'yanıt yok'}")
     return None
 
 
@@ -346,7 +346,7 @@ def merge_pr(pr_number):
     if r is not None and r.status_code == 200:
         log("   🔀 Otomatik merge edildi.")
         return True
-    log(f"   ⚠️  Merge edilemedi: HTTP {r.status_code if r else '?'} -> {r.text[:200] if r else 'yanıt yok'}")
+    log(f"   ⚠️  Merge edilemedi: HTTP {r.status_code if r is not None else '?'} -> {r.text[:200] if r is not None else 'yanıt yok'}")
     return False
 
 
@@ -393,7 +393,7 @@ def delete_branch(branch):
     )
     if r is not None and r.status_code == 204:
         return True
-    log(f"   ⚠️  Branch silinemedi ({branch}): HTTP {r.status_code if r else '?'}")
+    log(f"   ⚠️  Branch silinemedi ({branch}): HTTP {r.status_code if r is not None else '?'}")
     return False
 
 
@@ -527,6 +527,8 @@ def main():
             basarisiz += 1
             rapor_satirlari.append([n, title, branch, "HATA", "branch oluşturulamadı"])
             continue
+
+        time.sleep(1)  # EKLENDI: branch'in GitHub tarafında tam yayılmasına küçük bir pay
 
         if not create_junk_file(branch, file_path, content, f"{title}: saçma sapan dosya eklendi"):
             basarisiz += 1
