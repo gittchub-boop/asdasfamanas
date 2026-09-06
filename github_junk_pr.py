@@ -57,6 +57,13 @@ BRANCH_PREFIX = os.environ.get("BRANCH_PREFIX", "pit")
 
 FILE_DIR = os.environ.get("FILE_DIR", "junk")
 # ^ Saçma dosyalar bu klasörün altına düşer, repo kökünü kirletmez.
+#   PLACE_IN_ROOT=1 yaparsan bu tamamen devre dışı kalır (aşağıya bak).
+
+PLACE_IN_ROOT = os.environ.get("PLACE_IN_ROOT", "0") == "1"
+# ^ "1" yaparsan dosyalar FILE_DIR klasörünün İÇİNE değil, doğrudan
+#   REPO'NUN KÖKÜNE düşer. Böylece GitHub'da reponun ana sayfasını
+#   açan herkes dosyayı hemen görür (klasöre girmesi gerekmez).
+#   Varsayılan kapalı (kök dizini kirletmemek için), istersen aç.
 
 DRY_RUN = os.environ.get("DRY_RUN", "0") == "1"
 # ^ "1" yaparsan hiçbir gerçek branch/dosya/PR oluşturmaz, sadece ne
@@ -274,6 +281,13 @@ def create_pr(branch, base, title, body):
     if r is not None and r.status_code == 201:
         data = r.json()
         return data.get("html_url"), data.get("number")
+    if r is not None and r.status_code == 403 and "not permitted to create" in r.text.lower():
+        # EKLENDI: bu, koddan degil repo ayarindan kaynaklanan cok yaygin
+        # bir kilit - net yonlendirme veriyoruz.
+        log("   ❌ PR açılamadı: Repo ayarında GitHub Actions'ın PR açması engellenmiş.")
+        log("      Çözüm: Repo -> Settings -> Actions -> General -> 'Workflow permissions' ->")
+        log("      'Allow GitHub Actions to create and approve pull requests' kutusunu işaretle -> Save.")
+        return None, None
     log(f"   ❌ PR açılamadı: HTTP {r.status_code if r is not None else '?'} -> {r.text[:200] if r is not None else 'yanıt yok'}")
     return None, None
 
@@ -520,7 +534,7 @@ def main():
 
         title = TITLE_TEMPLATE.format(n=n)
         branch = f"{BRANCH_PREFIX}-{n}"
-        file_path = f"{FILE_DIR}/{branch}.md"
+        file_path = f"{branch}.md" if PLACE_IN_ROOT else f"{FILE_DIR}/{branch}.md"
         content = random.choice(JUNK_CONTENTS)
         body = random.choice(PR_BODIES)
 
