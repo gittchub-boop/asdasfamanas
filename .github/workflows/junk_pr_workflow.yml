@@ -64,8 +64,7 @@ permissions:
 
 jobs:
   run-script:
-    runs-on: ubuntu-latest
-    steps:
+    runs-on: ubuntu-lates
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
@@ -97,7 +96,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: junk-pr-output
+          name: junk-proutput
           path: |
             junk_pr_report.csv
             junk_pr_state.json
