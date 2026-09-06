@@ -28,6 +28,10 @@ on:
         description: "Kaç tane saçma Issue açılsın?"
         type: number
         default: 0
+      place_in_root:
+        description: "Dosyaları junk/ klasörü yerine repo kökünde göster"
+        type: boolean
+        default: false
       dry_run:
         description: "Gerçekten oluşturma/silme, sadece simüle et"
         type: boolean
@@ -70,6 +74,7 @@ jobs:
           MERGE_AFTER_CREATE: ${{ inputs.merge_after_create && '1' || '0' }}
           INCLUDE_JUNK_ISSUES: ${{ inputs.include_junk_issues && '1' || '0' }}
           ISSUE_COUNT: ${{ inputs.issue_count }}
+          PLACE_IN_ROOT: ${{ inputs.place_in_root && '1' || '0' }}
           DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
         run: python github_junk_pr.py
 
