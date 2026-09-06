@@ -1,0 +1,1 @@
+🗑️ resmi çöp dosyası
