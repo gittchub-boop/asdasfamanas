@@ -238,8 +238,29 @@ def create_branch(new_branch, base_sha):
 
 
 def create_junk_file(branch, path, content, message):
+    """EKLENDI: PUT'tan once o yolda zaten bir dosya var mi diye bakar.
+    Varsa SHA'sini payload'a ekler (guncelleme), yoksa SHA'siz gonderir
+    (yeni dosya olusturma). Boylece 'sha wasnt supplied' 422 hatasi
+    onceden var olan bir dosyayla karsilasinca artik patlamiyor,
+    dosyanin uzerine yaziyor."""
+    existing_sha = None
+    try:
+        r_check = requests.get(
+            f"{API}/repos/{REPO_OWNER}/{REPO_NAME}/contents/{path}",
+            headers=HEADERS,
+            params={"ref": branch},
+            timeout=15,
+        )
+        if r_check.status_code == 200:
+            existing_sha = r_check.json().get("sha")
+            log(f"   ℹ️  '{path}' zaten var, üzerine yazılacak (sha bulundu).")
+    except Exception as e:
+        log(f"   ⚠️  Mevcut dosya kontrolü başarısız (yine de denenecek): {e}")
+
     b64 = base64.b64encode(content.encode("utf-8")).decode("ascii")
     payload = {"message": message, "content": b64, "branch": branch}
+    if existing_sha:
+        payload["sha"] = existing_sha
     r = request_with_retry("PUT", f"{API}/repos/{REPO_OWNER}/{REPO_NAME}/contents/{path}", json=payload)
     if r is not None and r.status_code in (200, 201):
         return True
