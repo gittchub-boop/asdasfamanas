@@ -306,6 +306,13 @@ def search_bucket(query, max_items=1000):
         }
         r = request_with_retry("GET", SEARCH_URL, params=params)
         if r is None or r.status_code != 200:
+            # EKLENDI: eskiden burada hicbir sey yazdirmadan sessizce
+            # break ediliyordu, bu yuzden 0 sonuc alindiginda neden
+            # basarisiz oldugunu gormek imkansizdi. Simdi gosteriyoruz.
+            if r is not None:
+                safe_print(f"   ❌ Arama isteği başarısız: HTTP {r.status_code} -> {r.text[:200]}")
+            else:
+                safe_print("   ❌ Arama isteği başarısız: sunucudan yanıt alınamadı")
             break
         data = r.json().get("items", [])
         if not data:
@@ -442,6 +449,24 @@ def send_ntfy(message):
         )
     except Exception as e:
         safe_print(f"   ⚠️  ntfy bildirimi gönderilemedi: {e}")
+
+
+def check_auth():
+    """EKLENDI: gercek taramaya baslamadan once token'in gecerli olup
+    olmadigini kontrol eder. Boylece 89 sorgu boyunca sessiz sessiz
+    0 sonuc almak yerine, ilk 1-2 saniyede net bir hata gorursun."""
+    try:
+        r = requests.get("https://api.github.com/user", headers=HEADERS, timeout=15)
+        if r.status_code == 200:
+            login = r.json().get("login", "?")
+            safe_print(f"✅ Token doğrulandı, GitHub kullanıcısı: {login}")
+            return True
+        safe_print(f"❌ Token doğrulanamadı! HTTP {r.status_code} -> {r.text[:200]}")
+        safe_print("   Kontrol et: GH_TOKEN secret'i doğru mu / süresi dolmuş mu / doğru izinlere sahip mi?")
+        return False
+    except Exception as e:
+        safe_print(f"❌ Token doğrulama isteği başarısız: {e}")
+        return False
 
 
 def write_report(rows):
@@ -597,8 +622,16 @@ def get_all_repos(n):
 def main():
     global STATE
 
-    if TOKEN == "YOUR_GITHUB_TOKEN":
+    if not TOKEN or TOKEN == "YOUR_GITHUB_TOKEN":
+        # EKLENDI: bos string de ("" secret hic set edilmemis veya yanlis
+        # isimle set edilmis olabilir) artik yakalaniyor, eskiden sadece
+        # placeholder metnini kontrol ediyordu.
         print("⚠  Lütfen önce GH_TOKEN secret'ini ayarla, boş boş çalıştırma amk!")
+        return
+
+    if not check_auth():
+        # EKLENDI: token gecersizse 89 sorguyu bosuna denemek yerine
+        # hemen dur, net hata zaten yukarida basildi.
         return
 
     STATE = load_state()
