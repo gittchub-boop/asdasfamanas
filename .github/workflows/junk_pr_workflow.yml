@@ -1,0 +1,79 @@
+name: Junk PR Açıcı (Eğlence)
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "create mi cleanup mı?"
+        type: choice
+        options: [create, cleanup]
+        default: create
+      pr_count:
+        description: "Kaç tane saçma PR açılsın? (sadece create)"
+        type: number
+        default: 50
+      start_number:
+        description: "Başlık numarası nereden başlasın (pıt#N)?"
+        type: number
+        default: 2255
+      merge_after_create:
+        description: "PR'ları otomatik merge et (gerçek commit/contribution grafiği)"
+        type: boolean
+        default: false
+      include_junk_issues:
+        description: "Ek olarak saçma Issue'lar da açılsın mı?"
+        type: boolean
+        default: false
+      issue_count:
+        description: "Kaç tane saçma Issue açılsın?"
+        type: number
+        default: 0
+      dry_run:
+        description: "Gerçekten oluşturma/silme, sadece simüle et"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write
+  pull-requests: write
+  # ^ ÖNEMLİ: bu script SADECE bu repoya (workflow'un çalıştığı repo)
+  #   erişebilen otomatik GITHUB_TOKEN'ı kullanıyor. Ayrıca bir
+  #   GH_TOKEN secret'i eklemene GEREK YOK - bu daha güvenli, çünkü
+  #   token başka hiçbir repoya dokunamaz.
+
+jobs:
+  run-script:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Bağımlılıkları kur
+        run: pip install requests
+
+      - name: Scripti çalıştır
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO_OWNER: ${{ github.repository_owner }}
+          REPO_NAME: ${{ github.event.repository.name }}
+          ACTION: ${{ inputs.action }}
+          PR_COUNT: ${{ inputs.pr_count }}
+          START_NUMBER: ${{ inputs.start_number }}
+          MERGE_AFTER_CREATE: ${{ inputs.merge_after_create && '1' || '0' }}
+          INCLUDE_JUNK_ISSUES: ${{ inputs.include_junk_issues && '1' || '0' }}
+          ISSUE_COUNT: ${{ inputs.issue_count }}
+          DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
+        run: python github_junk_pr.py
+
+      - name: Rapor ve state'i artifact olarak yükle
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junk-pr-output
+          path: |
+            junk_pr_report.csv
+            junk_pr_state.json
+            junk_pr.log
