@@ -24,6 +24,14 @@ on:
         description: "Kaçarlı gruplar halinde işlensin (grup sonunda ara kayıt yapılır)"
         type: number
         default: 300
+      rate_limit_wait_cap:
+        description: "Rate limit'e takılınca en fazla kaç saniye beklenecek"
+        type: number
+        default: 150
+      rate_limit_rescue_rounds:
+        description: "Sadece rate limit yüzünden başarısız olanlar kaç tur daha denensin"
+        type: number
+        default: 5
 
 jobs:
   run-script:
@@ -59,6 +67,8 @@ jobs:
           RESET_STATE: ${{ inputs.reset_state && '1' || '0' }}
           MAX_WORKERS: ${{ inputs.max_workers }}
           BATCH_SIZE: ${{ inputs.batch_size }}
+          RATE_LIMIT_WAIT_CAP: ${{ inputs.rate_limit_wait_cap }}
+          RATE_LIMIT_RESCUE_ROUNDS: ${{ inputs.rate_limit_rescue_rounds }}
           # NTFY_TOPIC: ${{ secrets.NTFY_TOPIC }}   # istersen aç, telefonuna push bildirim gider
         run: python github_bulk_watch.py
 
