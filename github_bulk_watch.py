@@ -97,6 +97,20 @@ BATCH_PAUSE_SECONDS = float(os.environ.get("BATCH_PAUSE_SECONDS", "2"))
 # ^ EKLENDI: her grup (batch) arasinda beklenecek sure (rate limit'e
 #   nefes aldirmak icin).
 
+RATE_LIMIT_WAIT_CAP = int(os.environ.get("RATE_LIMIT_WAIT_CAP", "150"))
+# ^ EKLENDI: rate limit'e takilinca en fazla kac saniye beklenecek.
+#   GitHub bazen "reset" zamanini saatlik (core) kotaya gore verir ki bu
+#   3000+ saniye uzakta olabilir - bu tavan sayesinde script o kadar
+#   beklemez, 100-200 saniye araliginda kalir, sonra o repo/istegi
+#   RATE_LIMIT_RESCUE_ROUNDS ile tekrar kuyruga alir (asagiya bak).
+
+RATE_LIMIT_RESCUE_ROUNDS = int(os.environ.get("RATE_LIMIT_RESCUE_ROUNDS", "5"))
+# ^ EKLENDI: bir grup (batch) bitince, sadece RATE LIMIT yuzunden
+#   basarisiz olan repolar (gercek bir hata degil, sadece zamanlama)
+#   "yanmis" sayilmaz - RATE_LIMIT_WAIT_CAP kadar beklenip bu kadar
+#   tur daha otomatik olarak yeniden denenir. Hala basarisizsa ancak
+#   o zaman rapora "HATA" olarak yazilir.
+
 SEARCH_SLEEP_SECONDS = 1
 # ^ Her arama sayfasi arasinda bekleme suresi (saniye). GitHub arama ucu
 #   dakikada ~30 istege izin veriyor, bunun altinda kalmak icin var.
@@ -287,9 +301,15 @@ def request_with_retry(method, url, retries=5, **kwargs):
     """Rate limit'e (hiz sinirina) takilirsa GitHub'in soyledigi sureyi
     bekleyip tekrar dener. Boylece script hata verip yarida durmaz,
     biz de otururuz sakin sakin bekleriz amk.
-    EKLENDI: 5xx (gecici sunucu hatasi) durumlarinda da artik pes
-    etmiyor, kisa bir ustel bekleme ile tekrar deniyor - 'hata alinca
-    baska yol dene' mantigi artik butun istekler icin gecerli."""
+    5xx (gecici sunucu hatasi) durumlarinda da artik pes etmiyor, kisa
+    bir ustel bekleme ile tekrar deniyor.
+    DUZELTILDI: eskiden log satiri GERCEK bekleme suresini degil, HAM
+    (kirpilmamis) 'wait' degerini yazdiriyordu - core (saatlik) kota
+    tukendiginde bu deger GERCEKTEN 3000+ saniye olabiliyordu ve ekranda
+    oyle gorunuyordu, oysa script aslinda sadece RATE_LIMIT_WAIT_CAP
+    kadar bekliyordu. Artik ekranda gorunen sure = gercekten beklenen
+    sure. Ayrica bu tavan artik 100-200 saniye araliginda, konfigure
+    edilebilir (varsayilan 150s)."""
     r = None
     backoff = 2
     for attempt in range(retries):
@@ -301,8 +321,9 @@ def request_with_retry(method, url, retries=5, **kwargs):
             wait = 30
             if reset:
                 wait = max(5, int(reset) - int(time.time()) + 2)
-            safe_print(f"   ⏳ Hız sınırı doldu, {wait} saniye bekleniyor... (sabret dassana kurban)")
-            time.sleep(min(wait, 120))
+            gercek_bekleme = min(wait, RATE_LIMIT_WAIT_CAP)
+            safe_print(f"   ⏳ Hız sınırı doldu, {gercek_bekleme} saniye bekleniyor... (sabret dassana kurban)")
+            time.sleep(gercek_bekleme)
             continue
         if r.status_code == 403 and "abuse" in r.text.lower():
             safe_print("   ⏳ Abuse-detection tetiklendi, 60 saniye bekleniyor... (yavaş ol be)")
@@ -700,6 +721,87 @@ def get_all_repos(n):
     return finalize(merged, n)
 
 
+def is_rate_limited_detail(detay):
+    """EKLENDI: bir basarisizlik sadece RATE LIMIT yuzunden mi oldu,
+    yoksa gercek bir hata mi (404, 422, token izni yok vs) ayirt eder."""
+    return "rate limit" in (detay or "").lower()
+
+
+def process_repos_resilient(repos_list, worker_fn, on_success, label="işlem"):
+    """EKLENDI: repos_list'i BATCH_SIZE'lik gruplar halinde, MAX_WORKERS
+    paralellikte isler (watch_repo/unwatch_repo icin ortak). Basarisiz
+    olanlardan SADECE RATE LIMIT yuzunden basarisiz olanlar 'yanmaz':
+    RATE_LIMIT_WAIT_CAP kadar beklenip RATE_LIMIT_RESCUE_ROUNDS kadar
+    otomatik tekrar denenir. Gercek hatalar (rate limit disi) hemen
+    kesinlesir, bosuna beklenmez. Her grup ve her kurtarma turu sonunda
+    state diske kaydedilir. on_success(owner, name) basarili her repo
+    icin cagrilir (STATE listelerini guncellemek icin).
+    Donen deger: (rapor_satirlari, basarili_sayisi, basarisiz_sayisi)"""
+    final_rows = {}
+    basarili = 0
+    pending = repos_list
+    by_key = {f"{r['owner']['login']}/{r['name']}": r for r in repos_list}
+
+    for round_no in range(RATE_LIMIT_RESCUE_ROUNDS + 1):
+        if not pending:
+            break
+        if round_no > 0:
+            safe_print(
+                f"\n🛟 Kurtarma turu {round_no}/{RATE_LIMIT_RESCUE_ROUNDS}: {len(pending)} repo SADECE "
+                f"rate limit yüzünden bekletiliyor, {RATE_LIMIT_WAIT_CAP}s sonra tekrar denenecek (yanmayacaklar)..."
+            )
+            time.sleep(RATE_LIMIT_WAIT_CAP)
+
+        toplam = len(pending)
+        tamamlanan = 0
+        still_pending = []
+        for batch_start in range(0, toplam, BATCH_SIZE):
+            batch = pending[batch_start:batch_start + BATCH_SIZE]
+            batch_no = batch_start // BATCH_SIZE + 1
+            total_batches = (toplam + BATCH_SIZE - 1) // BATCH_SIZE
+            tur_etiketi = f"tur {round_no}, " if round_no > 0 else ""
+            safe_print(f"\n📦 {tur_etiketi}grup {batch_no}/{total_batches}: {len(batch)} repo {label} ediliyor...")
+
+            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+                futures = {executor.submit(worker_fn, repo): repo for repo in batch}
+                for future in as_completed(futures):
+                    owner, name, stars, ok, detay = future.result()
+                    tamamlanan += 1
+                    key = f"{owner}/{name}"
+                    if ok:
+                        final_rows[key] = [owner, name, stars, True, detay]
+                        basarili += 1
+                        on_success(owner, name)
+                        icon = "✅"
+                    elif is_rate_limited_detail(detay) and round_no < RATE_LIMIT_RESCUE_ROUNDS:
+                        still_pending.append(by_key[key])
+                        icon = "🛟"
+                    else:
+                        final_rows[key] = [owner, name, stars, False, detay]
+                        icon = "❌"
+                    safe_print(f"[{tamamlanan}/{toplam}] ⭐ {stars} - {owner}/{name} -> {icon} {detay}")
+
+            save_state(STATE)
+            write_report(list(final_rows.values()))
+            if batch_start + BATCH_SIZE < toplam:
+                safe_print(f"⏸️  Grup tamamlandı, {BATCH_PAUSE_SECONDS}s bekleniyor...")
+                time.sleep(BATCH_PAUSE_SECONDS)
+
+        pending = still_pending
+
+    # Butun kurtarma turlari tukendiyse, hala pending'de kalanlar kesin basarisiz sayilir
+    for repo in pending:
+        key = f"{repo['owner']['login']}/{repo['name']}"
+        if key not in final_rows:
+            final_rows[key] = [repo["owner"]["login"], repo["name"], repo.get("stargazers_count", "?"),
+                                False, "rate limit - tüm kurtarma turları tükendi"]
+
+    basarisiz = len(final_rows) - basarili
+    save_state(STATE)
+    write_report(list(final_rows.values()))
+    return list(final_rows.values()), basarili, basarisiz
+
+
 def main():
     global STATE
 
@@ -728,42 +830,16 @@ def main():
         safe_print(f"↩️  UNWATCH modu: {toplam} repo geri alınacak (daha önce bu scriptle watch edilenler).")
         check_rate_limit("core")
 
-        basarili = 0
-        basarisiz = 0
-        tamamlanan = 0
-        rapor_satirlari = []
+        def on_unwatch_success(owner, name):
+            full_name = f"{owner}/{name}"
+            if full_name in STATE["watched"]:
+                STATE["watched"].remove(full_name)
+            if full_name not in STATE["unwatched"]:
+                STATE["unwatched"].append(full_name)
 
-        # EKLENDI: gruplara bolunerek isleniyor, her grup sonunda state
-        # DISKE KAYDEDILIYOR - artik is yarida kesilirse sadece o anki
-        # grup kadar kayip olur, tum ilerleme degil.
-        for batch_start in range(0, toplam, BATCH_SIZE):
-            batch = repos[batch_start:batch_start + BATCH_SIZE]
-            batch_no = batch_start // BATCH_SIZE + 1
-            total_batches = (toplam + BATCH_SIZE - 1) // BATCH_SIZE
-            safe_print(f"\n📦 Grup {batch_no}/{total_batches}: {len(batch)} repo işleniyor...")
-
-            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-                futures = {executor.submit(unwatch_repo, repo): repo for repo in batch}
-                for future in as_completed(futures):
-                    owner, name, stars, ok, durum = future.result()
-                    tamamlanan += 1
-                    rapor_satirlari.append([owner, name, stars, ok, durum])
-                    if ok:
-                        basarili += 1
-                        full_name = f"{owner}/{name}"
-                        if full_name in STATE["watched"]:
-                            STATE["watched"].remove(full_name)
-                        if full_name not in STATE["unwatched"]:
-                            STATE["unwatched"].append(full_name)
-                    else:
-                        basarisiz += 1
-                    safe_print(f"[{tamamlanan}/{toplam}] ⭐ {stars} - {owner}/{name} -> {'✅' if ok else '❌'} {durum}")
-
-            save_state(STATE)  # EKLENDI: ara kayit - kritik duzeltme
-            write_report(rapor_satirlari)
-            if batch_start + BATCH_SIZE < toplam:
-                safe_print(f"⏸️  Grup tamamlandı, {BATCH_PAUSE_SECONDS}s bekleniyor...")
-                time.sleep(BATCH_PAUSE_SECONDS)
+        rapor_satirlari, basarili, basarisiz = process_repos_resilient(
+            repos, unwatch_repo, on_unwatch_success, label="unwatch"
+        )
 
         print("\n" + "=" * 60)
         print(f"UNWATCH BİTTİ! {basarili} repo geri alındı, {basarisiz} başarısız.")
@@ -789,44 +865,14 @@ def main():
 
     check_rate_limit("core")
 
-    basarili = 0
-    basarisiz = 0
-    tamamlanan = 0
-    rapor_satirlari = []
+    def on_watch_success(owner, name):
+        full_name = f"{owner}/{name}"
+        if full_name not in STATE["watched"]:
+            STATE["watched"].append(full_name)
 
-    # EKLENDI: watch da artik gruplara bolunuyor, her grup sonunda state
-    # DISKE KAYDEDILIYOR. Eskiden state SADECE tum 50.000 repo bitince
-    # bir kere kaydediliyordu - is yarida kesilirse (Actions timeout,
-    # abuse-detection kilidi, elle iptal vs) o ana kadar yapilan TUM
-    # watch'lar kaybolurdu. Artik en kotu ihtimalle bir grup (varsayilan
-    # 300 repo) kadar kayip olur, hepsi degil.
-    for batch_start in range(0, toplam, BATCH_SIZE):
-        batch = repos[batch_start:batch_start + BATCH_SIZE]
-        batch_no = batch_start // BATCH_SIZE + 1
-        total_batches = (toplam + BATCH_SIZE - 1) // BATCH_SIZE
-        safe_print(f"\n📦 Grup {batch_no}/{total_batches}: {len(batch)} repo watch ediliyor...")
-
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            futures = {executor.submit(watch_repo, repo): repo for repo in batch}
-            for future in as_completed(futures):
-                owner, name, stars, ok, durum = future.result()
-                tamamlanan += 1
-                rapor_satirlari.append([owner, name, stars, ok, durum])
-                if ok:
-                    basarili += 1
-                    full_name = f"{owner}/{name}"
-                    if full_name not in STATE["watched"]:
-                        STATE["watched"].append(full_name)
-                else:
-                    basarisiz += 1
-                safe_print(f"[{tamamlanan}/{toplam}] ⭐ {stars} - {owner}/{name} -> {'✅' if ok else '❌'} {durum}")
-
-        save_state(STATE)  # EKLENDI: ara kayit - kritik duzeltme
-        write_report(rapor_satirlari)
-        if batch_start + BATCH_SIZE < toplam:
-            check_rate_limit("core")
-            safe_print(f"⏸️  Grup tamamlandı, {BATCH_PAUSE_SECONDS}s bekleniyor...")
-            time.sleep(BATCH_PAUSE_SECONDS)
+    rapor_satirlari, basarili, basarisiz = process_repos_resilient(
+        repos, watch_repo, on_watch_success, label="watch"
+    )
 
     print("\n" + "=" * 60)
     print(f"BİTTİ DASSANA KURBAN! {basarili} repo onaylandı, {basarisiz} repo başarısız.")
