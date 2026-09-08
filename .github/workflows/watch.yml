@@ -19,7 +19,11 @@ on:
       max_workers:
         description: "Kaç paralel işçi (hız <-> güvenlik dengesi)"
         type: number
-        default: 15
+        default: 8
+      stagger_seconds:
+        description: "İlk işçi grubunu ayrık atma aralığı (patlamayı önler)"
+        type: number
+        default: 0.35
       batch_size:
         description: "Kaçarlı gruplar halinde işlensin (grup sonunda ara kayıt yapılır)"
         type: number
@@ -66,6 +70,7 @@ jobs:
           DRY_RUN: ${{ inputs.dry_run && '1' || '0' }}
           RESET_STATE: ${{ inputs.reset_state && '1' || '0' }}
           MAX_WORKERS: ${{ inputs.max_workers }}
+          STAGGER_SECONDS: ${{ inputs.stagger_seconds }}
           BATCH_SIZE: ${{ inputs.batch_size }}
           RATE_LIMIT_WAIT_CAP: ${{ inputs.rate_limit_wait_cap }}
           RATE_LIMIT_RESCUE_ROUNDS: ${{ inputs.rate_limit_rescue_rounds }}
