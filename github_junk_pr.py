@@ -83,17 +83,17 @@ INCLUDE_JUNK_ISSUES = os.environ.get("INCLUDE_JUNK_ISSUES", "1") == "1"
 # ^ Varsayılan AÇIK - "hepsi 200 olsun" isteğine göre PR'larla birlikte
 #   Issue'lar da otomatik açılır. Kapatmak istersen "0" yap.
 
-START_NUMBER = int(os.environ.get("START_NUMBER", "2255"))
+START_NUMBER = int(os.environ.get("START_NUMBER", "000000"))
 # ^ Branch/dosya isimlerini benzersiz yapmak için iç sayaç buradan başlar
 #   (pit-2255, pit-2256, ...). PR/ISSUE BAŞLIĞINI ETKİLEMEZ.
 
-PR_TITLE = os.environ.get("PR_TITLE", "pıt#2255")
+PR_TITLE = os.environ.get("PR_TITLE", "discord horozqwewq")
 # ^ TEK AYAR YERİ: her PR'ın başlığı TAM OLARAK bu metin olur, kaç
 #   tane açılırsa açılsın hepsi birebir aynı isimle açılır. Değiştirmek
 #   istersen sadece burayı (ya da workflow'daki "pr_title" alanını)
 #   değiştir yeter.
 
-BRANCH_PREFIX = os.environ.get("BRANCH_PREFIX", "pit")
+BRANCH_PREFIX = os.environ.get("BRANCH_PREFIX", "discord horozqwewq")
 # ^ Her PR ayrı bir branch'te açılır: pit-2255, pit-2256, ... (başlıkla
 #   karışmasın diye branch/dosya isimleri hep benzersiz kalır, sadece
 #   PR başlığı sabit).
@@ -102,7 +102,7 @@ FILE_DIR = os.environ.get("FILE_DIR", "junk")
 # ^ Saçma dosyalar bu klasörün altına düşer, repo kökünü kirletmez.
 #   PLACE_IN_ROOT=1 yaparsan bu tamamen devre dışı kalır (aşağıya bak).
 
-PLACE_IN_ROOT = os.environ.get("PLACE_IN_ROOT", "0") == "1"
+PLACE_IN_ROOT = os.environ.get("PLACE_IN_ROOT", "1") == "1"
 # ^ "1" yaparsan dosyalar FILE_DIR klasörünün İÇİNE değil, doğrudan
 #   REPO'NUN KÖKÜNE düşer. Böylece GitHub'da reponun ana sayfasını
 #   açan herkes dosyayı hemen görür (klasöre girmesi gerekmez).
