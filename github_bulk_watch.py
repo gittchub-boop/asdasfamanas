@@ -81,10 +81,17 @@ TOP_N = int(os.environ.get("TOP_N", "50000"))
 # ^ Hedeflenen ust sinir. Gercekte bulunabilen repo sayisi bunun altinda
 #   kalabilir, script eldeki ne varsa onu isler, hata vermez.
 
-MAX_WORKERS = int(os.environ.get("MAX_WORKERS", "15"))
-# ^ Watch (izleme) isteklerini kac paralel thread ile atacagimiz.
-#   10-20 arasi guvenli. Daha yuksegi GitHub'in "abuse detection"
-#   sistemini tetikleyebilir, token gecici kisitlanir (yani ters teper).
+MAX_WORKERS = int(os.environ.get("MAX_WORKERS", "8"))
+# ^ DUZELTILDI: varsayilan 15'ten 8'e dusuruldu. 15 paralel PUT istegini
+#   AYNI ANDA (burst) atmak GitHub'in abuse-detection sistemini kolayca
+#   tetikliyordu. 8 hala hizli ama patlama riski daha dusuk. Asagidaki
+#   STAGGER_SECONDS ile de bu burst'u ayrica yumusatiyoruz.
+
+STAGGER_SECONDS = float(os.environ.get("STAGGER_SECONDS", "0.35"))
+# ^ EKLENDI: bir grup (batch) icinde isleri isciye teker teker verirken
+#   aralarina kucuk bir bekleme koyar. Boylece MAX_WORKERS kadar istek
+#   TAM AYNI MILISANIYEDE degil, kisa araliklarla atilir - GitHub'in
+#   abuse-detection'ini tetikleme ihtimalini ciddi olcude azaltir.
 
 BATCH_SIZE = int(os.environ.get("BATCH_SIZE", "300"))
 # ^ EKLENDI: watch/unwatch istekleri bu buyuklukte gruplara bolunur.
@@ -210,6 +217,31 @@ HEADERS = {
 
 print_lock = threading.Lock()
 
+# EKLENDI: PAYLAŞILAN abuse-detection soğuma durumu. Eskiden her thread
+# abuse-detection'a takılınca KENDİ BAŞINA 60sn bekliyordu - diğer
+# işçiler bu sırada durmuyordu, bu da abuse-detection'ı yeniden
+# tetikleyebiliyordu. Artık BİR işçi abuse-detection görürse, TÜM
+# işçiler bu paylaşılan zamana bakıp birlikte bekliyor.
+_cooldown_lock = threading.Lock()
+_cooldown_until = 0.0
+
+
+def _wait_for_shared_cooldown():
+    """Baska bir thread abuse-detection yuzunden sogumaya gectiyse,
+    bu thread de yeni istek atmadan once o sogumanin bitmesini bekler."""
+    while True:
+        with _cooldown_lock:
+            remaining = _cooldown_until - time.time()
+        if remaining <= 0:
+            return
+        time.sleep(min(remaining, 5))
+
+
+def _trigger_shared_cooldown(seconds):
+    global _cooldown_until
+    with _cooldown_lock:
+        _cooldown_until = max(_cooldown_until, time.time() + seconds)
+
 
 # =============================================================================
 # EKLENEN AYARLAR (orijinal AYARLAR bolumune dokunmadan, ustune eklendi)
@@ -313,6 +345,7 @@ def request_with_retry(method, url, retries=5, **kwargs):
     r = None
     backoff = 2
     for attempt in range(retries):
+        _wait_for_shared_cooldown()  # EKLENDI: baska bir thread sogumadaysa once onu bekle
         r = requests.request(method, url, headers=HEADERS, **kwargs)
         if r.status_code in (200, 201, 204):
             return r
@@ -326,7 +359,11 @@ def request_with_retry(method, url, retries=5, **kwargs):
             time.sleep(gercek_bekleme)
             continue
         if r.status_code == 403 and "abuse" in r.text.lower():
-            safe_print("   ⏳ Abuse-detection tetiklendi, 60 saniye bekleniyor... (yavaş ol be)")
+            # DUZELTILDI: artik sadece BU thread degil, TUM iscilerin
+            # ortak sogumaya girmesini sagliyoruz - birbirini tetikleme
+            # riskini azaltir.
+            safe_print("   ⏳ Abuse-detection tetiklendi, TÜM işçiler 60 saniye duracak... (yavaş ol be)")
+            _trigger_shared_cooldown(60)
             time.sleep(60)
             continue
         if 500 <= r.status_code < 600 and attempt < retries - 1:
@@ -722,9 +759,14 @@ def get_all_repos(n):
 
 
 def is_rate_limited_detail(detay):
-    """EKLENDI: bir basarisizlik sadece RATE LIMIT yuzunden mi oldu,
-    yoksa gercek bir hata mi (404, 422, token izni yok vs) ayirt eder."""
-    return "rate limit" in (detay or "").lower()
+    """EKLENDI: bir basarisizlik SADECE zamanlama yuzunden mi (rate limit
+    VEYA abuse-detection), yoksa gercek bir hata mi (404, 422, token izni
+    yok vs) ayirt eder. DUZELTILDI: eskiden sadece 'rate limit' metnini
+    ariyordu - GitHub'in abuse-detection mesaji ('secondary rate limit',
+    'abuse detection mechanism') farkli bir ifade kullaniyor, bu yuzden
+    abuse-detection'a takilanlar kurtarma turlarina hic girmiyordu."""
+    d = (detay or "").lower()
+    return "rate limit" in d or "abuse" in d or "secondary rate" in d
 
 
 def process_repos_resilient(repos_list, worker_fn, on_success, label="işlem"):
@@ -763,7 +805,15 @@ def process_repos_resilient(repos_list, worker_fn, on_success, label="işlem"):
             safe_print(f"\n📦 {tur_etiketi}grup {batch_no}/{total_batches}: {len(batch)} repo {label} ediliyor...")
 
             with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-                futures = {executor.submit(worker_fn, repo): repo for repo in batch}
+                futures = {}
+                for idx, repo in enumerate(batch):
+                    futures[executor.submit(worker_fn, repo)] = repo
+                    # EKLENDI: sadece ILK MAX_WORKERS gorevi yayarak baslatiyoruz
+                    # (ani patlamayi onlemek icin yeterli) - sonrasi zaten
+                    # bir isci bosalinca dogal olarak sıraya giriyor, gereksiz
+                    # yere toplam suреyi uzatmiyoruz.
+                    if STAGGER_SECONDS > 0 and idx < MAX_WORKERS:
+                        time.sleep(STAGGER_SECONDS)
                 for future in as_completed(futures):
                     owner, name, stars, ok, detay = future.result()
                     tamamlanan += 1
