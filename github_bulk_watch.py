@@ -342,11 +342,28 @@ def request_with_retry(method, url, retries=5, **kwargs):
     kadar bekliyordu. Artik ekranda gorunen sure = gercekten beklenen
     sure. Ayrica bu tavan artik 100-200 saniye araliginda, konfigure
     edilebilir (varsayilan 150s)."""
+    RETRYABLE_EXC = (requests.exceptions.RequestException,)
     r = None
     backoff = 2
     for attempt in range(retries):
         _wait_for_shared_cooldown()  # EKLENDI: baska bir thread sogumadaysa once onu bekle
-        r = requests.request(method, url, headers=HEADERS, **kwargs)
+        try:
+            r = requests.request(method, url, headers=HEADERS, **kwargs)
+        except RETRYABLE_EXC as e:
+            # EKLENDI - ONEMLI: eskiden requests.request BURADA bir
+            # istisna firlatirsa (baglanti kopmasi, timeout, DNS hatasi,
+            # SSL sorunu vs) hicbir yerde yakalanmiyordu - thread'in
+            # future.result() cagrildigi an TUM scripti CRASH ETTIRME
+            # riski vardi. Artik gecici bir ag sorunu gibi ele alinip
+            # ustel bekleme ile tekrar deniyor, script asla bu yuzden
+            # cokmuyor.
+            if attempt < retries - 1:
+                safe_print(f"   🔁 Ağ hatası ({type(e).__name__}: {e}), {backoff}s sonra tekrar denenecek...")
+                time.sleep(backoff)
+                backoff = min(backoff * 2, 30)
+                continue
+            safe_print(f"   ❌ Ağ hatası, tüm denemeler tükendi: {type(e).__name__}: {e}")
+            return None
         if r.status_code in (200, 201, 204):
             return r
         if r.status_code == 403 and "rate limit" in r.text.lower():
@@ -405,7 +422,16 @@ def search_bucket(query, max_items=1000):
                 safe_print("   ❌ Arama isteği başarısız: sunucudan yanıt alınamadı")
             ok = False
             break
-        data = r.json().get("items", [])
+        try:
+            data = r.json().get("items", [])
+        except Exception as e:
+            # EKLENDI: GitHub 200 dondurup gecerli JSON vermezse (nadir
+            # ama proxy/CDN kaynakli olabilir), eskiden bu satir cikar
+            # ve tum taramayi durdururdu. Artik bu sorguyu basarisiz
+            # sayip devam ediyor.
+            safe_print(f"   ❌ Arama yanıtı ayrıştırılamadı (bozuk JSON): {e}")
+            ok = False
+            break
         if not data:
             break
         repos.extend(data)
@@ -759,14 +785,17 @@ def get_all_repos(n):
 
 
 def is_rate_limited_detail(detay):
-    """EKLENDI: bir basarisizlik SADECE zamanlama yuzunden mi (rate limit
-    VEYA abuse-detection), yoksa gercek bir hata mi (404, 422, token izni
-    yok vs) ayirt eder. DUZELTILDI: eskiden sadece 'rate limit' metnini
-    ariyordu - GitHub'in abuse-detection mesaji ('secondary rate limit',
-    'abuse detection mechanism') farkli bir ifade kullaniyor, bu yuzden
-    abuse-detection'a takilanlar kurtarma turlarina hic girmiyordu."""
+    """EKLENDI: bir basarisizlik SADECE zamanlama/gecicilik yuzunden mi
+    (rate limit, abuse-detection, ag hatasi, beklenmeyen istisna), yoksa
+    GERCEK bir hata mi (404 not found, 422 validation, token izni yok
+    vs) ayirt eder. Sadece gecici olanlar kurtarma turlarina girer,
+    gercek hatalar hemen kesinlesip bosuna beklenmez.
+    DUZELTILDI: eskiden sadece 'rate limit' metnini ariyordu - abuse-
+    detection, ag hatasi ve beklenmeyen istisnalar da ayni sekilde
+    'muhtemelen gecici' kabul edilip artik kurtarma turlarina giriyor."""
     d = (detay or "").lower()
-    return "rate limit" in d or "abuse" in d or "secondary rate" in d
+    gecici_isaretleri = ("rate limit", "abuse", "secondary rate", "ağ hatası", "beklenmeyen hata")
+    return any(isaret in d for isaret in gecici_isaretleri)
 
 
 def process_repos_resilient(repos_list, worker_fn, on_success, label="işlem"):
@@ -815,7 +844,23 @@ def process_repos_resilient(repos_list, worker_fn, on_success, label="işlem"):
                     if STAGGER_SECONDS > 0 and idx < MAX_WORKERS:
                         time.sleep(STAGGER_SECONDS)
                 for future in as_completed(futures):
-                    owner, name, stars, ok, detay = future.result()
+                    repo_ref = futures[future]
+                    try:
+                        owner, name, stars, ok, detay = future.result()
+                    except Exception as e:
+                        # EKLENDI - ONEMLI: watch_repo/unwatch_repo icinde
+                        # beklenmedik bir Python hatasi (bug, KeyError,
+                        # beklenmeyen None vs) cikarsa, eskiden bu future.result()
+                        # cagrisinda YAKALANMADAN yukari firlar ve TUM batch
+                        # islemeyi (dolayisiyla scripti) CRASH ETTIRIRDI.
+                        # Artik tek bir repo'nun basarisizligi olarak
+                        # kaydediliyor, script durmadan devam ediyor.
+                        owner = repo_ref.get("owner", {}).get("login", "?")
+                        name = repo_ref.get("name", "?")
+                        stars = repo_ref.get("stargazers_count", "?")
+                        ok = False
+                        detay = f"beklenmeyen hata: {type(e).__name__}: {e}"
+                        safe_print(f"   ⚠️  Beklenmeyen hata yakalandı ve script durdurulmadı: {owner}/{name} -> {detay}")
                     tamamlanan += 1
                     key = f"{owner}/{name}"
                     if ok:
@@ -850,6 +895,40 @@ def process_repos_resilient(repos_list, worker_fn, on_success, label="işlem"):
     save_state(STATE)
     write_report(list(final_rows.values()))
     return list(final_rows.values()), basarili, basarisiz
+
+
+def summarize_failures(rows):
+    """EKLENDI ('kod beyni'): basarisizliklari duz bir sayi olarak degil,
+    NEDEN basarisiz olduklarina gore kategorilere ayirip ozetler. Boylece
+    '37 basarisiz' yerine 'bunlarin 30'u rate limit tukendi, 5'i repo
+    silinmis, 2'si izin sorunu' gibi anlamli bir dokum gorursun."""
+    from collections import Counter
+    kategoriler = Counter()
+    ornekler = {}
+    for row in rows:
+        ok = row[3]
+        if ok:
+            continue
+        detay = (row[4] or "").lower()
+        if "rate limit" in detay or "abuse" in detay or "secondary rate" in detay:
+            kategori = "⏳ Rate limit / abuse-detection (tüm kurtarma turları tükendi)"
+        elif "404" in detay or "not found" in detay:
+            kategori = "🔍 Repo bulunamadı (404) - silinmiş/adı değişmiş olabilir"
+        elif "403" in detay:
+            kategori = "🔒 İzin reddedildi (403) - token yetkisi yetersiz olabilir"
+        elif "ağ hatası" in detay:
+            kategori = "🌐 Ağ hatası (tüm denemeler tükendi)"
+        elif "beklenmeyen hata" in detay:
+            kategori = "💥 Beklenmeyen/iç hata"
+        else:
+            kategori = "❓ Diğer"
+        kategoriler[kategori] += 1
+        ornekler.setdefault(kategori, f"{row[0]}/{row[1]}")
+
+    if kategoriler:
+        safe_print("\n🧠 Hata dökümü (kod beyninin özeti):")
+        for kategori, sayi in kategoriler.most_common():
+            safe_print(f"   - {kategori}: {sayi} repo (örnek: {ornekler[kategori]})")
 
 
 def main():
@@ -894,6 +973,7 @@ def main():
         print("\n" + "=" * 60)
         print(f"UNWATCH BİTTİ! {basarili} repo geri alındı, {basarisiz} başarısız.")
         print("=" * 60)
+        summarize_failures(rapor_satirlari)
         send_ntfy(f"GitHub unwatch bitti: {basarili} başarılı, {basarisiz} başarısız.")
         return
 
@@ -929,6 +1009,7 @@ def main():
     print("Bu repolarda ileride olacak hareketler için Gmail'ine")
     print("zamanla bildirim gelmeye başlayacak (anında değil, sabırlı ol).")
     print("=" * 60)
+    summarize_failures(rapor_satirlari)
 
     send_ntfy(f"GitHub watch bitti: {basarili} başarılı, {basarisiz} başarısız. Rapor: {REPORT_FILE}")
 
@@ -936,4 +1017,20 @@ def main():
 STATE = {"queries_done": [], "repos": {}, "watched": [], "unwatched": []}
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        # EKLENDI - SON GUVENLIK AGI: buraya kadar hicbir katman (network
+        # retry, future.result() koruma, batch/round dongusu) yakalayamadan
+        # sizan BEKLENMEDIK bir hata olursa bile, script CIPLAK bir traceback
+        # ile durup o ana kadarki ilerlemeyi kaybetmiyor. Elimizdeki STATE
+        # ne durumdaysa diske yaziliyor, hata acikca loglaniyor, sonra
+        # script (kontrollu bir sekilde) sonlaniyor.
+        import traceback
+        safe_print(f"\n💥 BEKLENMEDIK BIR HATA SCRIPTI DURDURDU: {type(e).__name__}: {e}")
+        safe_print(traceback.format_exc())
+        try:
+            save_state(STATE)
+            safe_print("💾 Elimizdeki ilerleme (STATE) yine de diske kaydedildi, bir sonraki çalıştırmada kaldığı yerden devam edecek.")
+        except Exception:
+            pass
