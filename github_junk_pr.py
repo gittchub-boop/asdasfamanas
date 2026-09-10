@@ -83,17 +83,17 @@ INCLUDE_JUNK_ISSUES = os.environ.get("INCLUDE_JUNK_ISSUES", "1") == "1"
 # ^ Varsayılan AÇIK - "hepsi 200 olsun" isteğine göre PR'larla birlikte
 #   Issue'lar da otomatik açılır. Kapatmak istersen "0" yap.
 
-START_NUMBER = int(os.environ.get("START_NUMBER", "000000"))
+START_NUMBER = int(os.environ.get("START_NUMBER", "2255"))
 # ^ Branch/dosya isimlerini benzersiz yapmak için iç sayaç buradan başlar
 #   (pit-2255, pit-2256, ...). PR/ISSUE BAŞLIĞINI ETKİLEMEZ.
 
-PR_TITLE = os.environ.get("PR_TITLE", "discord horozqwewq")
+PR_TITLE = os.environ.get("PR_TITLE", "pıt#2255")
 # ^ TEK AYAR YERİ: her PR'ın başlığı TAM OLARAK bu metin olur, kaç
 #   tane açılırsa açılsın hepsi birebir aynı isimle açılır. Değiştirmek
 #   istersen sadece burayı (ya da workflow'daki "pr_title" alanını)
 #   değiştir yeter.
 
-BRANCH_PREFIX = os.environ.get("BRANCH_PREFIX", "discord horozqwewq")
+BRANCH_PREFIX = os.environ.get("BRANCH_PREFIX", "pit")
 # ^ Her PR ayrı bir branch'te açılır: pit-2255, pit-2256, ... (başlıkla
 #   karışmasın diye branch/dosya isimleri hep benzersiz kalır, sadece
 #   PR başlığı sabit).
@@ -102,7 +102,7 @@ FILE_DIR = os.environ.get("FILE_DIR", "junk")
 # ^ Saçma dosyalar bu klasörün altına düşer, repo kökünü kirletmez.
 #   PLACE_IN_ROOT=1 yaparsan bu tamamen devre dışı kalır (aşağıya bak).
 
-PLACE_IN_ROOT = os.environ.get("PLACE_IN_ROOT", "1") == "1"
+PLACE_IN_ROOT = os.environ.get("PLACE_IN_ROOT", "0") == "1"
 # ^ "1" yaparsan dosyalar FILE_DIR klasörünün İÇİNE değil, doğrudan
 #   REPO'NUN KÖKÜNE düşer. Böylece GitHub'da reponun ana sayfasını
 #   açan herkes dosyayı hemen görür (klasöre girmesi gerekmez).
@@ -244,10 +244,23 @@ def rand_suffix(k=4):
 
 
 def request_with_retry(method, url, retries=5, **kwargs):
-    """Rate limit / abuse-detection'a takılırsa bekleyip tekrar dener."""
+    """Rate limit / abuse-detection'a takılırsa bekleyip tekrar dener.
+    EKLENDI: artik ag seviyesindeki istisnalari (baglanti kopmasi,
+    timeout, DNS hatasi) da yakalayip gecici hata gibi ele aliyor -
+    eskiden bunlar hicbir yerde yakalanmadan scripti crash ettirebilirdi."""
     r = None
+    backoff = 2
     for attempt in range(retries):
-        r = requests.request(method, url, headers=HEADERS, timeout=20, **kwargs)
+        try:
+            r = requests.request(method, url, headers=HEADERS, timeout=20, **kwargs)
+        except requests.exceptions.RequestException as e:
+            if attempt < retries - 1:
+                log(f"   🔁 Ağ hatası ({type(e).__name__}: {e}), {backoff}s sonra tekrar denenecek...")
+                time.sleep(backoff)
+                backoff = min(backoff * 2, 30)
+                continue
+            log(f"   ❌ Ağ hatası, tüm denemeler tükendi: {type(e).__name__}: {e}")
+            return None
         if r.status_code in (200, 201, 204):
             return r
         if r.status_code == 403 and "rate limit" in r.text.lower():
@@ -256,11 +269,16 @@ def request_with_retry(method, url, retries=5, **kwargs):
             if reset:
                 wait = max(5, int(reset) - int(time.time()) + 2)
             log(f"   ⏳ Hız sınırı doldu, {wait} saniye bekleniyor...")
-            time.sleep(min(wait, 120))
+            time.sleep(min(wait, 150))
             continue
         if r.status_code == 403 and "abuse" in r.text.lower():
             log("   ⏳ Abuse-detection tetiklendi, 60 saniye bekleniyor...")
             time.sleep(60)
+            continue
+        if 500 <= r.status_code < 600 and attempt < retries - 1:
+            log(f"   🔁 Geçici sunucu hatası (HTTP {r.status_code}), {backoff}s sonra tekrar denenecek...")
+            time.sleep(backoff)
+            backoff = min(backoff * 2, 30)
             continue
         return r
     return r
@@ -634,7 +652,12 @@ def process_item(n, base_branch):
 def run_batches(numbers, worker_fn, on_result):
     """EKLENDI: genel amacli 'gruplara bol + paralel isle + gruplar
     arasi mola ver' yardimcisi. worker_fn(n) -> sonuc, on_result(sonuc)
-    her sonucu isler (rapor/state guncelleme icin)."""
+    her sonucu isler (rapor/state guncelleme icin).
+    EKLENDI - GUVENLIK AGI: worker_fn icinde (process_item kendi
+    try/except'i disinda kalan bir yerde) beklenmedik bir hata
+    cikarsa, future.result() bunu burada firlatirdi ve TUM grup
+    islemeyi durdururdu. Artik yakalanip 'HATA' olarak isleniyor,
+    script devam ediyor."""
     total = len(numbers)
     for start in range(0, total, BATCH_SIZE):
         batch = numbers[start:start + BATCH_SIZE]
@@ -644,7 +667,14 @@ def run_batches(numbers, worker_fn, on_result):
         with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
             futures = {executor.submit(worker_fn, n): n for n in batch}
             for future in as_completed(futures):
-                on_result(future.result())
+                n = futures[future]
+                try:
+                    result = future.result()
+                except Exception as e:
+                    log(f"   ⚠️  #{n} işlenirken beklenmeyen hata yakalandı (script durmadı): {type(e).__name__}: {e}")
+                    result = {"n": n, "title": PR_TITLE, "branch": f"{BRANCH_PREFIX}-{n}",
+                              "status": "HATA", "detail": f"beklenmeyen hata: {e}"}
+                on_result(result)
         if start + BATCH_SIZE < total:
             log(f"⏸️  Grup tamamlandı, {BATCH_PAUSE_SECONDS} saniye bekleniyor (rate limit güvenliği)...")
             time.sleep(BATCH_PAUSE_SECONDS)
@@ -727,4 +757,11 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        # EKLENDI - SON GUVENLIK AGI: buraya kadar sizan beklenmedik bir
+        # hata scripti ciplak bir traceback ile durdurmasin diye.
+        import traceback
+        log(f"\n💥 BEKLENMEDIK BIR HATA SCRIPTI DURDURDU: {type(e).__name__}: {e}")
+        log(traceback.format_exc())
